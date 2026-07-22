@@ -1,0 +1,62 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.exe
+*.dylib
+build/
+*.out
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+build-*/
+*.cmake
+
+# IDE
+.vscode/*
+!.vscode/c_cpp_properties.json
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+
+# Binaries
+order_book
+orderbook
+test
+text.exe
+main.exe
+orderbook_demo
+orderbook_benchmark
+
+# Profiling & Coverage
+*.profraw
+*.profdata
+coverage/
+*.gcda
+*.gcno
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment & Secrets (never commit)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+*.pfx
+
+# macOS
+.AppleDouble
+.LSOverride
+._*
+
+# Generated files
+*.dep
+*.d
+depend

@@ -1,100 +1,101 @@
-# order-book
+# C++ Order Book
 
-An in-memory limit order book matching engine written in C++. Orders are
-submitted onto a thread-safe queue and applied to the book by a dedicated
-worker thread, keeping all book mutation single-threaded while submission can
-happen concurrently. It supports limit and market orders, order cancellation,
-and price-time (FIFO) priority matching across multiple price levels.
+A deterministic, in-memory C++20 limit-order-book and matching engine rebuilt from
+the original single-file prototype in [`main.cpp`](main.cpp). It is designed as a
+clear, tested, benchmarkable systems project—not as a claim of exchange production
+readiness.
 
-## Features
+## Highlights
 
-- **Limit orders** — rest on the book if they don't fully match; fill against
-  the best available opposing price otherwise.
-- **Market orders** — fill against the book at any price; report unfilled
-  quantity when liquidity runs out.
-- **Cancellation** — lazy cancel via an `is_active` flag; cancelled orders are
-  skipped and pruned during matching.
-- **Price-time priority** — best price first, FIFO within a price level.
-- **Price improvement** — a crossing order fills at the resting (maker's)
-  price, not its own limit.
-- **Concurrent submission** — orders are enqueued from any thread and applied
-  serially by a single worker, so the book itself needs no internal locking.
+- price-time priority with executions at the resting maker's price;
+- limit GTC, limit IOC, limit FOK, market IOC, and cancellation by ID;
+- strong numeric order IDs and checked four-decimal fixed-point prices;
+- preallocated order-node arena with stable handles and intrusive FIFO lists;
+- fixed-capacity open-addressed ID index with no per-order insertion allocation;
+- immediate O(1) unlink after ID/level lookup and correct level aggregates;
+- typed request results plus bounded POD execution/rejection sinks;
+- lockless-by-ownership `OrderBook` and optional single-worker `OrderBookEngine`;
+- debug invariant validation, deterministic stress coverage, sanitizers, and a
+  reproducible throughput/latency baseline.
+
+The full behavioral contract, ownership model, complexity, invariants, and design
+tradeoffs live in [docs/architecture.md](docs/architecture.md). Benchmark method and
+measured baseline live in [docs/benchmarking.md](docs/benchmarking.md).
 
 ## Architecture
 
-Order submission and order matching are decoupled through a queue:
-
-```
-producers ──enqueueOrder()──▶ order_queue ──processOrders()──▶ OrderBook
-   (any thread)              (mutex + condvar)   (single worker thread)
-```
-
-- **`OrderRequest`** — a plain value describing one action (`LIMIT`, `MARKET`,
-  or `CANCEL`) plus its fields.
-- **`enqueueOrder`** — pushes a request under `queueMutex` and notifies the
-  worker via `queueCV`.
-- **`processOrders`** — the worker loop. It blocks on the condition variable
-  until a request is available or `done` is set, pops one request, and
-  dispatches it to the matching `OrderBook` method. Because this is the only
-  code that touches the book, matching stays lock-free internally.
-- **`done`** — an `atomic<bool>` shutdown flag; once set and the queue drains,
-  the worker exits and can be `join`ed.
-
-### OrderBook internals
-
-The book itself is built around a few coordinated data structures:
-
-| Structure | Type | Purpose |
-|-----------|------|---------|
-| `order_map` | `unordered_map<string, shared_ptr<Order>>` | Look up active orders by ID (for cancel / query). |
-| `bid_levels` / `ask_levels` | `unordered_map<double, deque<shared_ptr<Order>>>` | FIFO queue of resting orders at each price level. |
-| `bids` | `priority_queue<double>` (max-heap) | Track the best (highest) bid price. |
-| `asks` | `priority_queue<double, …, greater<double>>` (min-heap) | Track the best (lowest) ask price. |
-
-Orders are held by `shared_ptr`, so an order stays alive in a price level's
-`deque` even after it's erased from `order_map`. Cancellation flips
-`is_active` to `false`; the matching loop lazily pops inactive orders off the
-front of each level (`clean_front`), and empty levels are removed from the
-heap on the fly.
-
-Matching (`match_against`) is templated over the heap comparator so the same
-logic drives both buy-side and sell-side matching. Fills are printed to
-stdout as `FILL:` lines; market orders that can't be fully filled print a
-`PARTIAL:` line.
-
-## API
-
-```cpp
-OrderBook book;
-
-// Direct calls
-book.add_limit_order(id, is_buy, price, quantity);  // rest or match a limit order
-book.add_market_order(id, is_buy, quantity);        // match at any price
-book.cancel_order(id);                              // cancel a resting order
-book.get_order_quantity(id);                        // remaining qty, or -1 if not active
-book.active_order_count();                          // number of active orders
-
-// Or via the queue (applied by the worker thread)
-enqueueOrder({ OrderType::LIMIT,  "L1", /*is_buy=*/false, /*price=*/100.0, /*qty=*/10 });
-enqueueOrder({ OrderType::MARKET, "M1", /*is_buy=*/true,  /*price=*/0.0,   /*qty=*/12 });
-enqueueOrder({ OrderType::CANCEL, "L1" });
+```text
+producer threads
+      |
+      v
+OrderBookEngine ---- mutex/CV FIFO, one owned worker (optional)
+      |
+      v
+OrderBook ---------- synchronous single-writer matching core
+  |       |       |
+  |       |       +-- POD executions/rejections -> EventSink
+  |       +---------- fixed-capacity OrderId -> OrderHandle index
+  +------------------ preallocated order pool + ordered price levels
 ```
 
-## Build & Run
+The core performs no console I/O and takes no locks. Order nodes and ID-index storage
+are allocated during construction. The baseline `std::map` price-level containers may
+allocate when a new price appears; the benchmark includes that cost.
 
-The threaded version requires linking pthreads:
+## Build and run
+
+Requirements: a C++20 compiler, CMake 3.20+, and POSIX threads.
 
 ```sh
-# Build and run the demo in main.cpp
-g++ -std=c++17 -O2 -pthread main.cpp -o order_book
-./order_book
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
 
-# Build and run the test suite
-g++ -std=c++17 -O2 -pthread test.cpp -o test
-./test
+./build/release/orderbook_demo
+./build/release/orderbook_benchmark
 ```
 
-The test harness (`test.cpp`) includes `main.cpp` directly (renaming its
-`main` out of the way) and captures stdout to assert on `FILL`/`PARTIAL`
-output. It covers no-match resting, exact/partial fills, price improvement,
-price-time priority, multi-level fills, cancellation, and market orders.
+Debug and sanitizer presets:
+
+```sh
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
+
+cmake --preset asan-ubsan
+cmake --build --preset asan-ubsan
+ctest --preset asan-ubsan
+
+cmake --preset tsan
+cmake --build --preset tsan
+ctest --preset tsan
+```
+
+This development environment has Apple Clang 17 but no CMake executable, so all
+targets were additionally compiled directly with equivalent C++20, warning, release,
+and sanitizer flags. Debug/release tests and UBSan pass. The installed Apple ASan
+runtime hangs at startup and TSan exits 139 even for a two-line empty test program;
+those two runtime checks must be rerun on a working sanitizer host or CI runner.
+
+## Tests
+
+The current suite has 19 deterministic cases across two executables. Coverage includes
+both matching directions, maker-price improvement, FIFO and multi-level sweeps,
+partial/full fills, GTC/IOC/FOK, market remainder, every cancellation position,
+invalid/duplicate requests, capacity reuse, event bounds, a 5,000-operation invariant
+stress sequence, queue draining, idempotent shutdown, and concurrent producers.
+
+## Repository layout
+
+```text
+include/orderbook/   public C++20 headers
+src/                 matching engine implementation
+tests/               core and threaded-engine tests
+apps/                runnable demo
+benchmarks/          deterministic benchmark executable
+docs/                architecture and benchmark methodology
+main.cpp, test.cpp   original prototype retained as historical input
+```
+
+The root prototype files are excluded from build targets so the evolution from the
+initial design remains reviewable.
