@@ -21,13 +21,14 @@ build-*/
 *~
 .idea/
 
-# Binaries & compiled outputs
-order_book
-orderbook
-test
+# Binaries & compiled outputs (root-anchored: a bare name like `orderbook`
+# would also ignore the include/orderbook/ source directory)
+/order_book
+/orderbook
+/test
 *.exe
-orderbook_demo
-orderbook_benchmark
+/orderbook_demo
+/orderbook_benchmark
 
 # Profiling & Coverage
 *.profraw
