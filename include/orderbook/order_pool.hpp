@@ -9,8 +9,8 @@
 namespace orderbook {
 
 struct OrderNode {
-    OrderId id;
-    Price price;
+    OrderId id{};
+    Price price{};
     Quantity remaining_quantity{0};
     Side side{Side::buy};
     OrderHandle previous{invalid_handle};

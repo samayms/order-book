@@ -26,7 +26,7 @@ private:
     enum class EntryState : std::uint8_t { empty, occupied, tombstone };
 
     struct Entry {
-        OrderId id;
+        OrderId id{};
         OrderHandle handle{invalid_handle};
         EntryState state{EntryState::empty};
     };
