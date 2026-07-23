@@ -78,7 +78,10 @@ benchmark also pass under UBSan built with
 runtime deadlocks before `main` even for a hello-world program (re-entrant
 `AsanInitInternal` -> `InitializeShadowMemory` -> dyld shared-cache query ->
 `malloc` -> ASan init spinlock), and TSan exits 139 for the same hello-world;
-those two runtime checks must be rerun on a working sanitizer host or CI runner.
+those two runtime checks run in CI instead: GitHub Actions builds and tests the
+debug, release, asan-ubsan, and tsan presets under both gcc and clang on
+ubuntu-latest (all passing as of 2026-07-23), with a release-mode benchmark
+validation run.
 
 ## Tests
 
