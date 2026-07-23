@@ -2,10 +2,10 @@
 
 ## 1. Purpose and scope
 
-This document is the technical source of truth for the rebuild of the original
-single-file order book in `main.cpp`. The rebuild preserves its useful behavior—
-limit orders, market orders, cancellation, price improvement, and price-time
-priority—while replacing unsafe or unmeasurable implementation choices.
+This document is the technical source of truth for the order-book engine. The
+current design preserves the early prototype's useful behavior—limit orders,
+market orders, cancellation, price improvement, and price-time priority—while
+replacing unsafe or unmeasurable implementation choices.
 
 Version 1 covers one instrument per `OrderBook` instance. It does not implement a
 network protocol, persistence/recovery, risk checks, authentication, multi-symbol
@@ -244,9 +244,6 @@ docs/
   architecture.md
 ```
 
-Root `main.cpp` and `test.cpp` remain as historical prototype inputs during the
-rebuild and are excluded from CMake targets.
-
 ## 11. Verification and performance gates
 
 Correctness tests cover conversions, both matching directions, price improvement,
@@ -269,7 +266,7 @@ measurements without failing correctness.
 
 ## 12. Lessons from the prototypes
 
-The original `main.cpp` established semantics but used floating-point hash keys,
+The original prototype established semantics but used floating-point hash keys,
 `shared_ptr` order ownership, duplicate heap/level state, lazy cancellation, global
 queue state, I/O during matching, and unsafe two-consumer shutdown.
 

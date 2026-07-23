@@ -13,13 +13,16 @@ build-*/
 *.cmake
 
 # IDE
-.vscode/*
-!.vscode/c_cpp_properties.json
+.vscode/
 .DS_Store
 *.swp
 *.swo
 *~
 .idea/
+
+# Legacy local prototypes (not part of the public project)
+/main.cpp
+/test.cpp
 
 # Binaries & compiled outputs (root-anchored: a bare name like `orderbook`
 # would also ignore the include/orderbook/ source directory)

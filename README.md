@@ -1,9 +1,8 @@
 # C++ Order Book
 
-A deterministic, in-memory C++20 limit-order-book and matching engine rebuilt from
-the original single-file prototype in [`main.cpp`](main.cpp). It is designed as a
-clear, tested, benchmarkable systems project—not as a claim of exchange production
-readiness.
+A deterministic, in-memory C++20 limit-order-book and matching engine. It is
+designed as a clear, tested, benchmarkable systems project—not as a claim of
+exchange production readiness.
 
 ## Highlights
 
@@ -112,8 +111,4 @@ tests/               core and threaded-engine tests
 apps/                runnable demo
 benchmarks/          deterministic benchmark executable
 docs/                architecture and benchmark methodology
-main.cpp, test.cpp   original prototype retained as historical input
 ```
-
-The root prototype files are excluded from build targets so the evolution from the
-initial design remains reviewable.
