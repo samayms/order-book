@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.preset }} / ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release, asan-ubsan, tsan]
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+      CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build (warnings are errors)
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      # Completion-gate smoke run: validates book invariants, zero rejections,
+      # and a stable checksum under a reduced deterministic workload. Not a
+      # performance measurement; shared CI runners are not a benchmark host.
+      - name: Benchmark validation (release only)
+        if: matrix.preset == 'release'
+        run: ./build/release/orderbook_benchmark --operations 70000 --iterations 20
