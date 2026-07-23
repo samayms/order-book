@@ -41,11 +41,11 @@ SubmitResult OrderBook::submit(const LimitOrder& order) {
     if (order.quantity == 0) {
         return reject(order.id, Status::invalid_quantity, 0);
     }
-    if (index_.contains(order.id)) {
-        return reject(order.id, Status::duplicate_order_id, order.quantity);
-    }
 
     if (order.time_in_force == TimeInForce::fok) {
+        if (index_.contains(order.id)) {
+            return reject(order.id, Status::duplicate_order_id, order.quantity);
+        }
         const AggregateQuantity available{
             available_quantity(order.side, order.price, order.quantity)};
         if (available < order.quantity) {
@@ -56,14 +56,32 @@ SubmitResult OrderBook::submit(const LimitOrder& order) {
     }
 
     if (order.time_in_force == TimeInForce::ioc) {
+        if (index_.contains(order.id)) {
+            return reject(order.id, Status::duplicate_order_id, order.quantity);
+        }
         IncomingOrder incoming{order.id, order.side, order.quantity};
         return match(incoming, order.price);
+    }
+
+    // GTC: one index probe (reserve) both rejects a duplicate and locates the
+    // slot to write if the order rests. Duplicate is detected before the pool
+    // allocation so it keeps precedence over capacity_exceeded; the reserved
+    // slot is committed in O(1) only if a remainder rests.
+    const auto reservation{index_.reserve(order.id)};
+    if (reservation.duplicate) {
+        return reject(order.id, Status::duplicate_order_id, order.quantity);
     }
 
     const auto handle{pool_.allocate(order.id, order.side, order.price, order.quantity)};
     if (!handle.has_value()) {
         return reject(order.id, Status::capacity_exceeded, order.quantity);
     }
+
+    // A GTC that cannot cross the current best opposite price rests in full
+    // without executing; skip the matching machinery entirely for it.
+    const bool crosses{order.side == Side::buy
+        ? (!asks_.empty() && asks_.begin()->first <= order.price)
+        : (!bids_.empty() && bids_.begin()->first >= order.price)};
 
     auto process_gtc = [&](auto& own_levels) {
         const auto insertion_result{[&] {
@@ -77,23 +95,21 @@ SubmitResult OrderBook::submit(const LimitOrder& order) {
         auto level_iterator{insertion_result.first};
         const bool inserted_level{insertion_result.second};
 
-        if (!index_.insert(order.id, *handle)) {
-            if (inserted_level) {
-                own_levels.erase(level_iterator);
-            }
-            pool_.release(*handle);
-            return reject(order.id, Status::capacity_exceeded, order.quantity);
+        if (!crosses) {
+            index_.commit(reservation, order.id, *handle);
+            append(*handle, level_iterator->second);
+            return SubmitResult{Status::accepted, 0, order.quantity, 0};
         }
 
         IncomingOrder incoming{order.id, order.side, order.quantity};
         SubmitResult result{match(incoming, order.price)};
         if (incoming.remaining_quantity == 0) {
-            static_cast<void>(index_.erase(order.id));
             pool_.release(*handle);
             if (inserted_level) {
                 own_levels.erase(level_iterator);
             }
         } else {
+            index_.commit(reservation, order.id, *handle);
             pool_.get(*handle).remaining_quantity = incoming.remaining_quantity;
             append(*handle, level_iterator->second);
         }
@@ -247,18 +263,23 @@ Status OrderBook::cancel(OrderId id) noexcept {
     }
 
     OrderNode& order{pool_.get(*handle)};
+    // Cancelling a top-of-book order is common; when the containing price is
+    // already begin() we take its iterator in O(1) instead of an O(log P) find.
+    // A cancelled order's price is always present, so the map is non-empty.
+    auto cancel_from = [&](auto& levels) {
+        auto level_iterator{levels.begin()};
+        if (level_iterator->first != order.price) {
+            level_iterator = levels.find(order.price);
+        }
+        unlink(*handle, level_iterator->second);
+        if (level_iterator->second.order_count == 0) {
+            levels.erase(level_iterator);
+        }
+    };
     if (order.side == Side::buy) {
-        const auto level_iterator{bids_.find(order.price)};
-        unlink(*handle, level_iterator->second);
-        if (level_iterator->second.order_count == 0) {
-            bids_.erase(level_iterator);
-        }
+        cancel_from(bids_);
     } else {
-        const auto level_iterator{asks_.find(order.price)};
-        unlink(*handle, level_iterator->second);
-        if (level_iterator->second.order_count == 0) {
-            asks_.erase(level_iterator);
-        }
+        cancel_from(asks_);
     }
     static_cast<void>(index_.erase(id));
     pool_.release(*handle);

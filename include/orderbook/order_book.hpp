@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <functional>
 #include <map>
+#include <memory_resource>
 #include <optional>
 #include <string>
 
@@ -78,8 +79,9 @@ private:
         Quantity remaining_quantity{0};
     };
 
-    using BidLevels = std::map<Price, Level, std::greater<Price>>;
-    using AskLevels = std::map<Price, Level>;
+    using LevelAllocator = std::pmr::polymorphic_allocator<std::pair<const Price, Level>>;
+    using BidLevels = std::map<Price, Level, std::greater<Price>, LevelAllocator>;
+    using AskLevels = std::map<Price, Level, std::less<Price>, LevelAllocator>;
 
     [[nodiscard]] SubmitResult reject(OrderId id, Status status,
                                       Quantity remaining) noexcept;
@@ -96,8 +98,13 @@ private:
     EventSink* event_sink_;
     OrderPool pool_;
     OrderIndex index_;
-    BidLevels bids_;
-    AskLevels asks_;
+    // Pool the map nodes for price levels: when a level is emptied and later
+    // recreated (common under churn) the freed node is recycled instead of
+    // round-tripping through the global allocator. Declared before the maps so
+    // it outlives them.
+    std::pmr::unsynchronized_pool_resource level_pool_;
+    BidLevels bids_{&level_pool_};
+    AskLevels asks_{&level_pool_};
     SequenceNumber next_execution_sequence_{1};
 };
 

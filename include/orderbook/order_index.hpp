@@ -17,6 +17,20 @@ public:
     [[nodiscard]] std::optional<OrderHandle> find(OrderId id) const noexcept;
     [[nodiscard]] bool erase(OrderId id) noexcept;
 
+    // Two-phase insert for the GTC path: reserve() does one probe that both
+    // detects a duplicate and locates the slot the entry would occupy; commit()
+    // writes that slot in O(1) after matching decides the order rests. This
+    // replaces a separate contains()+insert() (two probes) with one. Between
+    // reserve() and commit() the only index mutations are erase()s of filled
+    // makers, which turn occupied slots into tombstones and never create an
+    // empty slot or rebuild, so the reserved position stays valid.
+    struct Reservation {
+        std::size_t slot{0};
+        bool duplicate{false};
+    };
+    [[nodiscard]] Reservation reserve(OrderId id) noexcept;
+    void commit(Reservation reservation, OrderId id, OrderHandle handle) noexcept;
+
     [[nodiscard]] bool contains(OrderId id) const noexcept { return find(id).has_value(); }
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] std::size_t capacity() const noexcept { return maximum_entries_; }

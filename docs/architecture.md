@@ -123,16 +123,36 @@ load factor below 0.5. This removes the per-entry allocations of
 
 Bids use `std::map<Price, Level, std::greater<>>`; asks use ascending `std::map`.
 The best price is always `begin()`. A `Level` stores FIFO head/tail handles, order
-count, and aggregate remaining quantity.
+count, and aggregate remaining quantity. The maps draw their nodes from a
+`std::pmr::unsynchronized_pool_resource` owned by the book, so a level emptied and
+later recreated recycles its node instead of round-tripping the global allocator.
 
 - best price: O(1)
 - create/find/erase price level: O(log P), where P is active price levels
 - append/unlink within level: O(1)
-- a new map node may allocate; this is the only intentional matching-state allocation
-  after construction in the baseline design
+- creating a level allocates a map node only when the pool has no recycled node to
+  hand back (i.e. when the peak level count grows); under steady churn the node is
+  reused, so this is the only intentional matching-state allocation after
+  construction and it is amortised away once the working set is warm
 
 Specialized flat or bounded price structures are future benchmark variants, not
 assumed improvements.
+
+### Implemented hot-path optimizations
+
+Measured wins layered on the baseline design, each proven on the benchmark plus
+deep-FIFO, multi-level, and randomized holdout workloads with identical checksums:
+
+- **PMR level-node pooling** (above): recycles map nodes across level churn.
+- **Top-of-book cancel fast path**: when the cancelled order's price is already
+  `begin()`, its level iterator is taken in O(1) instead of an O(log P) find.
+- **Two-phase GTC index insert** (`OrderIndex::reserve`/`commit`): one probe both
+  detects a duplicate and locates the destination slot; the slot is committed in
+  O(1) only if a remainder rests, replacing a separate `contains`+`insert`.
+  Duplicate detection stays before the pool allocation, preserving
+  duplicate-over-capacity precedence and rejection atomicity.
+- **Non-crossing GTC fast path**: a GTC that cannot cross the best opposite price
+  rests directly without entering the matching loop.
 
 ## 6. Request lifecycle and atomicity
 
@@ -268,3 +288,88 @@ repeated calls. The rebuild retains the useful concepts while correcting those e
 - bounded/faster price-level containers selected by benchmark evidence;
 - property-based fuzzing against a simple reference book;
 - hardware-counter and allocation instrumentation.
+
+## 14. Design decision record
+
+A single index of the significant choices and their rationale. Measured decisions
+link to [`benchmarking.md`](benchmarking.md) for the numbers rather than repeating
+them here; the sections above give the mechanics.
+
+### Domain and API
+
+- **Integer tick prices, numeric order IDs, fixed-width quantities in the core**
+  (§3). Rationale: exact, hashable, deterministic ordering with no floating-point
+  rounding in matching. Decimal/string forms are an adapter concern.
+  `price_from_double` rejects NaN/±inf and non-positive input; this correctness
+  guarantee is why `-ffast-math` is disallowed (its finite-math assumptions can
+  invalidate those checks).
+- **Typed `Status`/`SubmitResult` for expected failures; exceptions only for
+  invalid construction and unexpected allocator failure** (§3, §6). Rationale:
+  request-level failures are ordinary control flow and must not unwind; a rejected
+  request never partially mutates the book.
+
+### Core data structures
+
+- **Preallocated `std::vector<OrderNode>` order pool with an intrusive freelist;
+  orders reference each other by 32-bit `OrderHandle` indices, not pointers**
+  (§5 Order pool). Rationale: O(1) `noexcept` allocate/release, stable references,
+  no per-order heap allocation or `shared_ptr` ownership, trivially serialisable
+  links. Free nodes use the dedicated `next_free` handle; active nodes use
+  `previous`/`next` for their price-level FIFO.
+- **Fixed-capacity open-addressed hash index (`OrderId → OrderHandle`) with
+  empty/occupied/tombstone slots and a power-of-two mask**, chosen over
+  `std::unordered_map<std::string, …>` (§5 Order ID index). Rationale: O(1)
+  expected lookup at load factor < 0.5 with zero per-entry allocation after
+  construction.
+- **Tombstone deletion with a preallocated scratch-table rebuild when tombstones exceed
+  `table_size / 8`** (`ORDERBOOK_TOMBSTONE_REBUILD_DIVISOR`). Rationale: the
+  divisor was swept as a compile-time knob; 8 was the measured peak (too-rare
+  rebuilds lengthen probe chains, too-frequent rebuilds dominate). See
+  `benchmarking.md`. Backward-shift deletion was considered and rejected for this
+  iteration: relocating entries on erase is incompatible with the current
+  slot-index reservation token, and profiling did not identify the index as the
+  next bottleneck.
+- **`std::map<Price, Level>` (descending for bids, ascending for asks); best price
+  is always `begin()`** (§5 Price levels). Rationale: O(1) best price, ordered
+  iteration for sweeps, O(log P) create/find/erase. Flat/bounded price structures
+  remain a deferred, benchmark-gated variant, not an assumed win.
+
+### Allocation and hot-path optimizations (measured; see `benchmarking.md`)
+
+- **PMR node pooling: the price-level maps draw nodes from a
+  `std::pmr::unsynchronized_pool_resource` owned by the book.** Rationale: levels
+  emptied and recreated under churn recycle their tree node instead of
+  round-tripping the global allocator; the largest single measured win.
+- **Top-of-book cancel fast path:** when the cancelled order's price is already
+  `begin()`, take the level iterator in O(1) instead of an O(log P) find.
+- **Non-crossing GTC fast path:** a GTC that cannot cross the best opposite price
+  rests directly without entering the matching loop.
+- **Two-phase GTC index insert (`OrderIndex::reserve`/`commit`):** one probe both
+  detects a duplicate and locates the destination slot; the slot is committed in
+  O(1) only if a remainder rests. Preserves duplicate-over-capacity precedence
+  (duplicate is detected before the pool allocation) and rejection atomicity.
+  Each of these four was validated in isolation with interleaved A/B benchmarking
+  and a paired t-test. A temporary supplemental holdout harness found no regression;
+  the checked-in standard workload remains the reproducible performance gate.
+
+### Concurrency
+
+- **Single-writer, lock-free-by-ownership `OrderBook`; optional `OrderBookEngine`
+  serialises many producers onto one worker** (§4, §9). Rationale: keeps the hot
+  path free of synchronisation and makes ordering deterministic. This is *not*
+  lock-free concurrency, and parallel mutation of one `OrderBook` is unsupported
+  by design.
+- **Event callbacks receive `noexcept` POD events; no console I/O in matching code**
+  (§4 EventSink). Rationale: the matching core stays allocation- and I/O-free;
+  printing/recording adapters live outside it.
+
+### Build configuration
+
+- **Release compiles at `-O2` with link-time optimization, enabled
+  via `CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE` behind a `check_ipo_supported`
+  guard; debug and sanitizer presets keep the default `-O0`/`-O2` and no LTO.**
+  Rationale: LTO is a large, statistically significant throughput win; `-O2` beat
+  the CMake-default `-O3` by a small but repeatable margin on this branchy
+  map/hash-probe code (`-O3`'s heavier inlining/unrolling costs more than it buys).
+  Both hold correctness identical (same checksum, zero rejections). See
+  `benchmarking.md` for the measurements and the paired-comparison methodology.

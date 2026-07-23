@@ -6,6 +6,31 @@ set(ORDERBOOK_SANITIZER "" CACHE STRING "Sanitizer: address-undefined or thread"
 
 find_package(Threads REQUIRED)
 
+# Enable link-time / interprocedural optimization for Release only. Measured on
+# the deterministic benchmark (M4-class arm64, Apple Clang 17): LTO improves
+# Release throughput repeatably (~+2-6% across interleaved runs) with identical
+# correctness (checksum, invariants, zero rejections). Debug and sanitizer
+# builds deliberately skip it to keep codegen fast and debuggable. Guarded by a
+# support check so toolchains without IPO still configure.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ORDERBOOK_IPO_SUPPORTED OUTPUT ORDERBOOK_IPO_MESSAGE)
+if(ORDERBOOK_IPO_SUPPORTED)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+else()
+    message(STATUS "IPO/LTO not enabled: ${ORDERBOOK_IPO_MESSAGE}")
+endif()
+
+# Release ships -O2 instead of CMake's default -O3. On the deterministic
+# benchmark (M4-class arm64, Apple Clang 17, LTO on) -O2 measured faster than
+# -O3 in two independent paired studies (+0.3% over 15 rounds, +1.65% over 10
+# rounds, significant the second time; checksum identical either way). The
+# margin is small and workload-specific — -O3's heavier inlining/unrolling costs
+# more than it buys on this branchy map + hash-probe code. Revisit if the
+# workload changes. Surgical swap so -DNDEBUG and any other default flags remain.
+if(NOT MSVC)
+    string(REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+endif()
+
 add_library(orderbook_warnings INTERFACE)
 if(MSVC)
     target_compile_options(orderbook_warnings INTERFACE

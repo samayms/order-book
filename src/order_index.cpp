@@ -97,6 +97,42 @@ bool OrderIndex::insert(OrderId id, OrderHandle handle) noexcept {
     return false;
 }
 
+OrderIndex::Reservation OrderIndex::reserve(OrderId id) noexcept {
+    // The caller validates the id. The physical table has at least twice the
+    // configured logical capacity, so an empty slot remains available even when
+    // a later pool allocation rejects the request. Mirrors insert()'s probe but
+    // writes nothing; commit() finalises the chosen slot only for a remainder.
+    if (tombstone_count_ > entries_.size() / tombstone_rebuild_divisor) {
+        rebuild();
+    }
+    std::size_t first_tombstone{entries_.size()};
+    std::size_t index{bucket(id)};
+    for (std::size_t probes{0}; probes < entries_.size(); ++probes) {
+        const Entry& entry{entries_[index]};
+        if (entry.state == EntryState::occupied && entry.id == id) {
+            return Reservation{index, true};
+        }
+        if (entry.state == EntryState::tombstone && first_tombstone == entries_.size()) {
+            first_tombstone = index;
+        }
+        if (entry.state == EntryState::empty) {
+            return Reservation{
+                first_tombstone == entries_.size() ? index : first_tombstone, false};
+        }
+        index = (index + 1) & (entries_.size() - 1);
+    }
+    return Reservation{first_tombstone, false};
+}
+
+void OrderIndex::commit(Reservation reservation, OrderId id, OrderHandle handle) noexcept {
+    Entry& entry{entries_[reservation.slot]};
+    if (entry.state == EntryState::tombstone) {
+        --tombstone_count_;
+    }
+    entry = Entry{id, handle, EntryState::occupied};
+    ++size_;
+}
+
 std::optional<OrderHandle> OrderIndex::find(OrderId id) const noexcept {
     if (!id.valid()) {
         return std::nullopt;

@@ -39,8 +39,10 @@ OrderBook ---------- synchronous single-writer matching core
 ```
 
 The core performs no console I/O and takes no locks. Order nodes and ID-index storage
-are allocated during construction. The baseline `std::map` price-level containers may
-allocate when a new price appears; the benchmark includes that cost.
+are allocated during construction. The `std::map` price-level containers draw their
+nodes from a `std::pmr::unsynchronized_pool_resource`, so a price level emptied and
+later recreated recycles its node; a fresh allocation happens only when the peak
+level count grows. The benchmark includes that cost.
 
 ## Build and run
 
@@ -54,6 +56,16 @@ ctest --preset release
 ./build/release/orderbook_demo
 ./build/release/orderbook_benchmark
 ```
+
+The release configuration enables link-time / interprocedural optimization
+(`CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE`, guarded by a CMake support check)
+and compiles at `-O2` rather than CMake's default `-O3`. LTO is the large,
+robust win: on this host it improves benchmark throughput ~4-5% in a 10-round
+paired study (significant, t=-3.87). `-O2` is a smaller, workload-specific edge
+over `-O3` (~1-1.6% in paired runs) — `-O3`'s heavier inlining/unrolling costs
+more than it buys on this branchy `std::map` + hash-probe code. Both hold
+correctness identical (same checksum, zero rejections, invariants intact). Debug
+and sanitizer presets deliberately omit LTO and keep the default `-O0`/`-O2`.
 
 Debug and sanitizer presets:
 

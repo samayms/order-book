@@ -94,6 +94,35 @@ int main() {
         suite.equal(index.size(), std::size_t{8}, "index size is incorrect after churn");
     });
 
+    suite.run("two-phase index reservation remains valid across erases", [&] {
+        orderbook::OrderIndex index{4};
+        const auto first_reservation{index.reserve(id(1))};
+        suite.expect(!first_reservation.duplicate, "new id reported as duplicate");
+        suite.equal(index.size(), std::size_t{0}, "reservation mutated index size");
+        index.commit(first_reservation, id(1), 0);
+        suite.equal(index.find(id(1)), std::optional<orderbook::OrderHandle>{0},
+                    "committed reservation was not findable");
+        suite.expect(index.reserve(id(1)).duplicate,
+                     "reservation failed to detect duplicate id");
+
+        suite.expect(index.insert(id(2), 1), "supporting index insertion failed");
+        const auto pending{index.reserve(id(3))};
+        suite.expect(!pending.duplicate, "pending id reported as duplicate");
+        suite.expect(index.erase(id(2)), "erase during reservation failed");
+        index.commit(pending, id(3), 2);
+        suite.equal(index.find(id(3)), std::optional<orderbook::OrderHandle>{2},
+                    "erase invalidated a pending reservation");
+
+        suite.expect(index.erase(id(1)), "erase before tombstone reuse failed");
+        const auto reused{index.reserve(id(1))};
+        suite.expect(!reused.duplicate, "erased id remained duplicate");
+        index.commit(reused, id(1), 3);
+        suite.equal(index.find(id(1)), std::optional<orderbook::OrderHandle>{3},
+                    "reservation did not reuse erased id storage");
+        suite.equal(index.size(), std::size_t{2},
+                    "two-phase reservation corrupted index size");
+    });
+
     suite.run("noncrossing limits rest and expose top of book", [&] {
         OrderBook book;
         suite.expect(book.submit(LimitOrder{id(1), Side::buy, price_99, 10}).accepted(),
@@ -271,6 +300,21 @@ int main() {
         static_cast<void>(book.cancel(id(1)));
         suite.expect(book.submit(LimitOrder{id(3), Side::buy, price_99, 1}).accepted(),
                      "released capacity was not reusable");
+        require_valid(book);
+    });
+
+    suite.run("duplicate GTC outranks capacity when the book is full", [&] {
+        OrderBook book{BookConfig{2, nullptr}};
+        static_cast<void>(book.submit(LimitOrder{id(1), Side::buy, price_99, 1}));
+        static_cast<void>(book.submit(LimitOrder{id(2), Side::buy, price_99, 1}));
+        // Book is at capacity; resubmitting an active id must report the
+        // duplicate (which is detected before the pool allocation), not
+        // capacity_exceeded, and must not mutate the book.
+        const auto duplicate{book.submit(LimitOrder{id(1), Side::buy, price_99, 1})};
+        suite.equal(duplicate.status, Status::duplicate_order_id,
+                    "duplicate id at capacity did not outrank capacity_exceeded");
+        suite.equal(book.stats().active_orders, std::size_t{2},
+                    "duplicate rejection mutated the book");
         require_valid(book);
     });
 
