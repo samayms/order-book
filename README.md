@@ -71,10 +71,13 @@ cmake --build --preset tsan
 ctest --preset tsan
 ```
 
-This development environment has Apple Clang 17 but no CMake executable, so all
-targets were additionally compiled directly with equivalent C++20, warning, release,
-and sanitizer flags. Debug/release tests and UBSan pass. The installed Apple ASan
-runtime hangs at startup and TSan exits 139 even for a two-line empty test program;
+Verified on this development host (Apple M4 Pro, Apple Clang 17, CMake 4.4,
+2026-07): strict debug and release builds plus CTest pass, and the full suite and
+benchmark also pass under UBSan built with
+`-fsanitize=undefined -fno-sanitize-recover=undefined`. The installed Apple ASan
+runtime deadlocks before `main` even for a hello-world program (re-entrant
+`AsanInitInternal` -> `InitializeShadowMemory` -> dyld shared-cache query ->
+`malloc` -> ASan init spinlock), and TSan exits 139 for the same hello-world;
 those two runtime checks must be rerun on a working sanitizer host or CI runner.
 
 ## Tests

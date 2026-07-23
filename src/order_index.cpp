@@ -4,9 +4,23 @@
 #include <limits>
 #include <stdexcept>
 
+// Rebuild the table when tombstones exceed table_size / divisor. Overridable at
+// compile time so benchmark experiments can sweep the threshold. The default of
+// 8 was the fastest measured divisor on the deterministic benchmark workload
+// (Apple M4 Pro, Apple Clang 17, 2026-07): sweep of {1,2,4,6,8,12,16,32} showed
+// a peak at 8 (~+3-6% throughput vs 4); 1 (never rebuild) degrades throughput
+// ~7x. Latency percentiles p50-p99.9 were indistinguishable between 4 and 8.
+#ifndef ORDERBOOK_TOMBSTONE_REBUILD_DIVISOR
+#define ORDERBOOK_TOMBSTONE_REBUILD_DIVISOR 8
+#endif
+
 namespace orderbook {
 
 namespace {
+
+inline constexpr std::size_t tombstone_rebuild_divisor{
+    ORDERBOOK_TOMBSTONE_REBUILD_DIVISOR};
+static_assert(tombstone_rebuild_divisor >= 1);
 
 [[nodiscard]] std::size_t table_size_for(std::size_t maximum_entries) {
     if (maximum_entries == 0 ||
@@ -47,7 +61,7 @@ bool OrderIndex::insert(OrderId id, OrderHandle handle) noexcept {
     if (!id.valid() || size_ >= maximum_entries_) {
         return false;
     }
-    if (tombstone_count_ > entries_.size() / 4) {
+    if (tombstone_count_ > entries_.size() / tombstone_rebuild_divisor) {
         rebuild();
     }
 
