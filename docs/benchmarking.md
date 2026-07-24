@@ -92,6 +92,51 @@ the reproducible performance gate.
 Maximum latency is intentionally omitted from comparisons because it is dominated by
 OS scheduling noise in this short local run; the executable still prints it.
 
+## Multibook coordination benchmark (FourBookEngine)
+
+`benchmarks/four_book_benchmark.cpp` measures the **coordination layer** of
+`FourBookEngine` — routing, four per-book mutex/condition-variable queues, four
+worker threads, and the `std::future` completion path. It **must not** be compared
+with the single-book direct-core benchmark above; they measure different layers,
+and the coordination numbers include per-request future overhead.
+
+The workload is deliberately order-independent: every add is a non-crossing buy and
+every cancel targets one of the same producer's own still-resting orders. Under any
+thread interleaving the result is zero rejections and a deterministic per-book state
+and checksum, so a nonzero rejection count or a changed checksum flags a real
+defect. Each scenario runs a warmup, a throughput pass, and a bounded-in-flight
+(32 requests/producer) latency pass, and validates all four books after shutdown.
+
+Scenarios: `single` (1 producer → 1 book, the one-worker ceiling), `independent`
+(4 producers, one book each, no queue contention), `balanced` (4 producers spread
+evenly over all books), and `skewed` (~80% to one hot book).
+
+```sh
+cmake --preset release
+cmake --build --preset release
+./build/release/four_book_benchmark
+```
+
+Illustrative run (2026-07-23, Apple M4-class arm64, 12 logical cores, `-O2` + LTO;
+all scenarios reported zero rejections and valid books). Numbers vary run to run;
+this is a qualitative snapshot, not a gate:
+
+| Scenario | Aggregate throughput | Notes |
+|---|---:|---|
+| single | ~3.0M ops/s | one book, one worker — coordination ceiling |
+| independent | ~7.3M ops/s | ~2.4× single; four books scale with no cross-book contention |
+| balanced | ~3.1M ops/s | even per book, limited by four producers contending on all queues |
+| skewed | ~2.2M ops/s | bottlenecked on the hot book while the others idle |
+
+Enqueue-to-completion latency at the 32-request in-flight window was ~12 µs p50 for
+`single` and rose with contention (tens of µs). The gap from linear 4× scaling is
+the producer/completion path (promise/future per request, queue-mutex contention),
+which is where Phase 3 would evaluate a bounded response channel or batched
+completions against the current future API. Four workers help aggregate throughput
+only when independent books keep them busy and the completion path is not the
+bottleneck — the benchmark, not the thread count, decides whether it helps a given
+workload.
+
 ## Optimization protocol
 
 The baseline is not a claim of optimality. For a tuning session:

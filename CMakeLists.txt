@@ -44,6 +44,7 @@ endif()
 add_library(orderbook
     src/engine.cpp
     src/events.cpp
+    src/four_book_engine.cpp
     src/order_book.cpp
     src/order_index.cpp
     src/order_pool.cpp)
@@ -81,7 +82,10 @@ function(orderbook_executable target source)
 endfunction()
 
 orderbook_executable(orderbook_demo apps/demo_main.cpp)
+orderbook_executable(four_book_demo apps/four_book_demo.cpp)
+orderbook_executable(four_book_events_demo apps/four_book_events_demo.cpp)
 orderbook_executable(orderbook_benchmark benchmarks/orderbook_benchmark.cpp)
+orderbook_executable(four_book_benchmark benchmarks/four_book_benchmark.cpp)
 
 enable_testing()
 orderbook_executable(orderbook_core_tests tests/test_order_book.cpp)
@@ -93,6 +97,16 @@ orderbook_executable(orderbook_engine_tests tests/test_engine.cpp)
 target_include_directories(orderbook_engine_tests PRIVATE tests)
 add_test(NAME orderbook_engine_tests COMMAND orderbook_engine_tests)
 set_tests_properties(orderbook_engine_tests PROPERTIES LABELS "integration;threaded")
+
+orderbook_executable(orderbook_four_book_tests tests/test_four_book_engine.cpp)
+target_include_directories(orderbook_four_book_tests PRIVATE tests)
+add_test(NAME orderbook_four_book_tests COMMAND orderbook_four_book_tests)
+set_tests_properties(orderbook_four_book_tests PROPERTIES LABELS "integration;threaded")
+
+orderbook_executable(orderbook_event_stream_tests tests/test_event_stream.cpp)
+target_include_directories(orderbook_event_stream_tests PRIVATE tests)
+add_test(NAME orderbook_event_stream_tests COMMAND orderbook_event_stream_tests)
+set_tests_properties(orderbook_event_stream_tests PROPERTIES LABELS "integration;threaded")
 
 include(GNUInstallDirs)
 install(TARGETS orderbook EXPORT orderbookTargets

@@ -88,6 +88,36 @@ owned worker processes them in queue order. Shutdown stops admission, drains acc
 commands, joins exactly once, and rejects subsequent submissions. The engine never
 creates multiple consumers for one book.
 
+### `FourBookEngine`
+
+An optional routing facade over four independent `OrderBookEngine` shards, for
+matching four independent instruments in parallel. It owns
+`std::array<std::unique_ptr<OrderBookEngine>, 4>` (heap allocations done once at
+construction) and a `std::atomic<bool>` admission gate; it has **no worker thread
+and no lock on the matching path**. `enqueue(BookId, OrderRequest)` validates the
+`BookId` and forwards to that shard, so requests for different books run
+concurrently while requests for one book stay serialized. An order's stable
+identity is `(BookId, OrderId)` — the same `OrderId` may be active in more than
+one book, duplicate detection stays local to a book, and each book keeps its own
+`SequenceNumber` (global execution identity is `(BookId, SequenceNumber)`). Each
+book must be given a **distinct** event sink; sharing one across the four workers
+would be a data race. For a single merged live feed, `event_stream.hpp` provides
+`MergedEventStream`: one bounded lock-free single-producer/single-consumer ring per
+book (the book's worker is the sole producer), a `RoutingEventSink` per book that
+tags each event with its `BookId` and pushes it into that ring, and a `drain()` a
+single consumer thread calls to receive all four books' events as one
+book-tagged stream. A full ring drops the event and increments a per-book counter
+rather than blocking or allocating inside the matching callback, so a slow consumer
+costs telemetry, never matching progress. `shutdown()` stops admission once, then stops and joins all
+four shards (each drains its accepted commands); a request racing shutdown is
+either completed by its shard or returns `engine_stopped`, never lost. Books are
+read only via `book_after_shutdown(BookId)`. This is Phase 1 of
+[`four-book-threading-plan.md`](four-book-threading-plan.md), with a runnable
+`four_book_demo`, a `four_book_benchmark` (Phase 2, coordination-layer only — see
+`benchmarking.md`), and the merged event stream above plus `four_book_events_demo`
+(Phase 3a). The remaining Phase 3b — a measured futures-vs-bounded-channel
+completion path and optional CPU-affinity tuning — is deferred and evidence-gated.
+
 ### `EventSink`
 
 Receives non-owning, numeric POD events synchronously. Callbacks are `noexcept` and
@@ -227,21 +257,31 @@ include/orderbook/
   order_index.hpp    fixed-capacity ID-to-handle hash index
   order_book.hpp     synchronous matching API and views
   engine.hpp         optional serialized producer interface
+  book_id.hpp        strong BookId shared by the four-book layer
+  four_book_engine.hpp  four-shard routing facade (FourBookEngine)
+  event_stream.hpp   SPSC rings + merged book-tagged event feed
 src/
   events.cpp
   order_pool.cpp
   order_index.cpp
   order_book.cpp
   engine.cpp
+  four_book_engine.cpp
 tests/
   test_order_book.cpp
   test_engine.cpp
+  test_four_book_engine.cpp
+  test_event_stream.cpp
 apps/
   demo_main.cpp
+  four_book_demo.cpp
+  four_book_events_demo.cpp
 benchmarks/
   orderbook_benchmark.cpp
+  four_book_benchmark.cpp
 docs/
   architecture.md
+  four-book-threading-plan.md
 ```
 
 ## 11. Verification and performance gates
@@ -359,6 +399,18 @@ them here; the sections above give the mechanics.
 - **Event callbacks receive `noexcept` POD events; no console I/O in matching code**
   (§4 EventSink). Rationale: the matching core stays allocation- and I/O-free;
   printing/recording adapters live outside it.
+- **Parallel matching is composition, not a matching change** (§4 `FourBookEngine`).
+  Four independent books each get one worker thread; a routing facade forwards by
+  `BookId`. Rationale: keep the tuned single-writer matching path untouched and make
+  concurrency a routing/lifetime problem. Deliberately no shared global order index
+  and no shared atomic sequence counter — both would add cross-core contention;
+  identity is `(BookId, OrderId)` and each book keeps its own `SequenceNumber`.
+- **Merged event feed uses lock-free SPSC rings, not a shared sink** (§5,
+  `event_stream.hpp`). Each book's worker is the sole producer into its own ring;
+  one consumer drains all four. Rationale: sharing a sink across four workers is a
+  data race; a per-book single-producer/single-consumer ring needs no lock, and a
+  **drop-and-count** overflow policy keeps a slow consumer from ever blocking or
+  allocating inside a matching callback.
 
 ### Build configuration
 
